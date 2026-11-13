@@ -3,9 +3,10 @@ name: Update IV bars
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions minimum is 5 minutes (cannot do 2).
-    # 5-min samples still form 10m IV OHLC bars.
-    - cron: "*/5 14-20 * * 1-5"
+    # Every 5 minutes, every day (GitHub cannot do 2-minute cron).
+    # 0DTE append is gated in Python (RTH only).
+    # Next-expiry appends on every run, including nights/weekends.
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: write

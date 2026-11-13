@@ -18,6 +18,7 @@ DTE1_BARS = os.path.join(ROOT, f"{TICKER}_1dte_bars.json")
 
 
 def is_rth(now_et=None):
+    """Mon–Fri 09:30–16:00 ET only."""
     now_et = now_et or datetime.now(ET)
     if now_et.weekday() >= 5:
         return False
@@ -25,22 +26,35 @@ def is_rth(now_et=None):
     return dtime(9, 30) <= t < dtime(16, 0)
 
 
-def get_atm_iv(ticker_obj, spot, expiration):
+def get_atm_iv(ticker_obj, spot, expiration, strict_quotes=True):
+    """
+    ATM call/put mid IV (%).
+    strict_quotes=True  -> require live bid/ask (0DTE / RTH)
+    strict_quotes=False -> accept Yahoo IV even if bid/ask flat (next expiry off-hours)
+    """
     chain = ticker_obj.option_chain(expiration)
     calls, puts = chain.calls.copy(), chain.puts.copy()
     if calls.empty or puts.empty:
         return None
+
     calls["dist"] = (calls["strike"] - spot).abs()
     puts["dist"] = (puts["strike"] - spot).abs()
     c = calls.loc[calls["dist"].idxmin()]
     p = puts.loc[puts["dist"].idxmin()]
-    for leg in (c, p):
-        bid = float(leg.get("bid") or 0)
-        ask = float(leg.get("ask") or 0)
-        iv = float(leg.get("impliedVolatility") or 0)
-        if bid <= 0 or ask <= bid or iv < 0.01:
-            return None
-    return round(((float(c["impliedVolatility"]) + float(p["impliedVolatility"])) / 2.0) * 100, 2)
+
+    iv_c = float(c.get("impliedVolatility") or 0)
+    iv_p = float(p.get("impliedVolatility") or 0)
+    if iv_c < 0.01 or iv_p < 0.01:
+        return None
+
+    if strict_quotes:
+        for leg in (c, p):
+            bid = float(leg.get("bid") or 0)
+            ask = float(leg.get("ask") or 0)
+            if bid <= 0 or ask <= bid:
+                return None
+
+    return round(((iv_c + iv_p) / 2.0) * 100, 2)
 
 
 def cleanup_old(csv_path):
@@ -70,17 +84,19 @@ def to_lwc_bars(df):
     bars = []
     for ts, row in df.iterrows():
         et_ts = ts.replace(tzinfo=ET) if ts.tzinfo is None else ts.tz_convert(ET)
-        bars.append({
-            "time": int(et_ts.astimezone(ZoneInfo("UTC")).timestamp()),
-            "open": round(float(row["Open"]), 4),
-            "high": round(float(row["High"]), 4),
-            "low": round(float(row["Low"]), 4),
-            "close": round(float(row["Close"]), 4),
-        })
+        bars.append(
+            {
+                "time": int(et_ts.astimezone(ZoneInfo("UTC")).timestamp()),
+                "open": round(float(row["Open"]), 4),
+                "high": round(float(row["High"]), 4),
+                "low": round(float(row["Low"]), 4),
+                "close": round(float(row["Close"]), 4),
+            }
+        )
     return bars
 
 
-def iv_10m_from_csv(csv_path):
+def iv_10m_from_csv(csv_path, rth_only=False):
     if not os.path.exists(csv_path):
         return pd.DataFrame()
     df = pd.read_csv(csv_path, parse_dates=["Timestamp"])
@@ -90,11 +106,11 @@ def iv_10m_from_csv(csv_path):
     col = "ATM_IV" if "ATM_IV" in df.columns else "ATM_0DTE_IV"
     out = df[col].resample("10min").agg(["first", "max", "min", "last"]).dropna()
     out.columns = ["Open", "High", "Low", "Close"]
-    return filter_rth(out)
+    return filter_rth(out) if rth_only else out
 
 
-def write_iv_bars(ticker, book, expiration, iv_csv, out_json, spot):
-    iv = iv_10m_from_csv(iv_csv)
+def write_iv_bars(ticker, book, expiration, iv_csv, out_json, spot, rth_only=False):
+    iv = iv_10m_from_csv(iv_csv, rth_only=rth_only)
     payload = {
         "ticker": ticker,
         "book": book,
@@ -111,13 +127,17 @@ def write_iv_bars(ticker, book, expiration, iv_csv, out_json, spot):
 
 
 def append_iv(csv_path, price, atm_iv, expiration, book):
-    row = pd.DataFrame([{
-        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "Price": round(price, 2),
-        "ATM_IV": atm_iv,
-        "Expiration": expiration,
-        "Book": book,
-    }])
+    row = pd.DataFrame(
+        [
+            {
+                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Price": round(price, 2),
+                "ATM_IV": atm_iv,
+                "Expiration": expiration,
+                "Book": book,
+            }
+        ]
+    )
     row.to_csv(csv_path, mode="a", header=not os.path.exists(csv_path), index=False)
 
 
@@ -127,37 +147,45 @@ def main():
     tkr = yf.Ticker(TICKER)
     spot = float(tkr.fast_info["last_price"])
     exps = list(tkr.options)
+
+    # First two listed expiries: nearest + next
     exp_0 = exps[0] if exps else None
     exp_1 = exps[1] if len(exps) > 1 else None
 
-    print(f"{now_et} RTH={rth} {TICKER}=${spot:.2f} 0DTE={exp_0} 1DTE={exp_1}")
+    print(f"{now_et} RTH={rth} {TICKER}=${spot:.2f} nearest={exp_0} next={exp_1}")
     cleanup_old(ODTE_IV_CSV)
     cleanup_old(DTE1_IV_CSV)
 
-    if rth and exp_0:
-        iv0 = get_atm_iv(tkr, spot, exp_0)
-        if iv0 is not None:
-            append_iv(ODTE_IV_CSV, spot, iv0, exp_0, "0DTE")
-            print(f"0DTE IV appended: {iv0}%")
+    # ----- nearest / 0DTE: RTH ONLY -----
+    if exp_0:
+        if rth:
+            iv0 = get_atm_iv(tkr, spot, exp_0, strict_quotes=True)
+            if iv0 is not None:
+                append_iv(ODTE_IV_CSV, spot, iv0, exp_0, "0DTE")
+                print(f"0DTE IV appended: {iv0}%")
+            else:
+                print("0DTE IV skipped (stale quotes)")
         else:
-            print("0DTE IV skipped (stale quotes)")
+            print("0DTE IV skipped (outside RTH)")
+        write_iv_bars(
+            TICKER, "0DTE", exp_0, ODTE_IV_CSV, ODTE_BARS, spot, rth_only=True
+        )
     else:
-        print("0DTE IV skipped (outside RTH)" if exp_0 else "no 0DTE expiry")
+        print("no nearest expiry")
 
-    if rth and exp_1:
-        iv1 = get_atm_iv(tkr, spot, exp_1)
+    # ----- next expiry (1DTE / weekend-holiday equivalent): ALWAYS -----
+    if exp_1:
+        iv1 = get_atm_iv(tkr, spot, exp_1, strict_quotes=False)
         if iv1 is not None:
             append_iv(DTE1_IV_CSV, spot, iv1, exp_1, "1DTE")
-            print(f"1DTE IV appended: {iv1}%")
+            print(f"NEXT IV appended: {iv1}% (exp {exp_1})")
         else:
-            print("1DTE IV skipped (stale quotes)")
+            print(f"NEXT IV skipped (no usable IV on exp {exp_1})")
+        write_iv_bars(
+            TICKER, "1DTE", exp_1, DTE1_IV_CSV, DTE1_BARS, spot, rth_only=False
+        )
     else:
-        print("1DTE IV skipped (outside RTH)" if exp_1 else "no 1DTE expiry")
-
-    if exp_0:
-        write_iv_bars(TICKER, "0DTE", exp_0, ODTE_IV_CSV, ODTE_BARS, spot)
-    if exp_1:
-        write_iv_bars(TICKER, "1DTE", exp_1, DTE1_IV_CSV, DTE1_BARS, spot)
+        print("no next expiry")
 
     print("done")
 

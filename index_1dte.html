@@ -88,7 +88,7 @@ async function load(){
     spot.textContent=data.spot!=null?Number(data.spot).toFixed(2):"—";
     live.style.color=ivData.length?"#26a69a":"#f59e0b";
     if(ivData.length) paintHud(ivData.at(-1));
-    else meta.textContent="no IV bars yet — waiting for RTH samples";
+    else meta.textContent="no IV bars yet — waiting for next-expiry samples";
     setRange();
   }catch(e){
     live.style.color="#ef5350";
