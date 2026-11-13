@@ -6,13 +6,18 @@ on:
       loops:
         description: "How many samples this run (sleep 5m between). Use 1 for a single shot."
         required: false
-        default: "11"
+        default: "1"
   repository_dispatch:
     types: [update-iv]
   schedule:
-    # GitHub's */5 cron is unreliable (often delayed/skipped).
-    # Start once an hour; the job loops every 5 minutes internally.
-    - cron: "1 * * * *"
+    # GitHub often skips dense crons; fire 4x/hour instead of relying on */5.
+    # Each scheduled run takes one sample (loops default = 1).
+    # If schedule still never appears in Actions history, use MacroDroid / cron-job.org
+    # to POST workflow_dispatch every 5–15 minutes (see repo README note).
+    - cron: "0 * * * *"
+    - cron: "15 * * * *"
+    - cron: "30 * * * *"
+    - cron: "45 * * * *"
 
 concurrency:
   group: update-iv-bars
@@ -20,6 +25,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   update:
@@ -39,19 +45,21 @@ jobs:
       - name: Install deps
         run: pip install pandas yfinance
 
-      - name: Poll IV every 5 minutes
+      - name: Sample ATM IV
         env:
-          # schedule / repository_dispatch → 11 samples (~55m)
-          # workflow_dispatch → use input (default 11)
-          LOOPS: ${{ github.event.inputs.loops || '11' }}
+          # schedule / repository_dispatch → 1 sample
+          # workflow_dispatch → input (default 1; set 11 for a ~55m burst)
+          LOOPS: ${{ github.event.inputs.loops || '1' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          echo "event=$EVENT_NAME"
           loops="$LOOPS"
           case "$loops" in
-            ''|*[!0-9]*) loops=11 ;;
+            ''|*[!0-9]*) loops=1 ;;
           esac
           if [ "$loops" -lt 1 ]; then loops=1; fi
           if [ "$loops" -gt 12 ]; then loops=12; fi
