@@ -9,8 +9,10 @@
 <style>
   :root{--bg:#0d1117;--hud:#111827;--line:#1f2937;--text:#d1d4dc;--muted:#8b949e;--iv:#00bcd4}
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
-    font:13px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+  html,body{margin:0;height:100%;height:100dvh;background:var(--bg);color:var(--text);
+    font:13px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden;
+    display:flex;flex-direction:column}
+  #top,#hud,#chips{flex:0 0 auto}
   #top{display:flex;justify-content:space-between;align-items:center;gap:8px;
     padding:8px 10px;background:var(--hud);border-bottom:1px solid var(--line)}
   #sym{font-weight:700;font-size:15px} #meta{color:var(--muted);font-size:11px}
@@ -20,7 +22,8 @@
   #chips{display:flex;gap:6px;padding:6px 10px;border-bottom:1px solid var(--line)}
   .chip{border:1px solid #30363d;background:#161b22;color:var(--text);border-radius:6px;padding:4px 10px;font-size:12px}
   .chip.active{border-color:var(--iv);color:#fff}
-  #chart{height:calc(100vh - 110px);width:100%}
+  /* flex:1 + min-height:0 keeps the time-scale axis on-screen (no 100vh clip) */
+  #chart{flex:1 1 auto;min-height:0;width:100%}
 </style>
 </head>
 <body>
@@ -39,13 +42,32 @@
   <div id="chart"></div>
 <script>
 const BARS_URL="SPY_1dte_bars.json";
-const opts={layout:{background:{color:"#0d1117"},textColor:"#d1d4dc"},
+const chartEl=document.getElementById("chart");
+function fmtTick(t){
+  const d=new Date((typeof t==="number"?t:t)*1000);
+  const mo=d.toLocaleString("en-US",{month:"short",timeZone:"America/New_York"});
+  const day=d.toLocaleString("en-US",{day:"numeric",timeZone:"America/New_York"});
+  const hm=d.toLocaleString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false,timeZone:"America/New_York"});
+  return `${mo} ${day} ${hm}`;
+}
+const opts={layout:{background:{color:"#0d1117"},textColor:"#d1d4dc",fontSize:11},
   grid:{vertLines:{color:"#1f242c"},horzLines:{color:"#1f242c"}},
   crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
   rightPriceScale:{borderVisible:false},
-  timeScale:{borderVisible:false,timeVisible:true,secondsVisible:false},
+  timeScale:{
+    borderVisible:true,
+    borderColor:"#30363d",
+    timeVisible:true,
+    secondsVisible:false,
+    ticksVisible:true,
+    tickMarkFormatter:fmtTick,
+  },
+  localization:{
+    locale:"en-US",
+    timeFormatter:fmtTick,
+  },
   handleScroll:{vertTouchDrag:false}};
-const chart=LightweightCharts.createChart(document.getElementById("chart"), opts);
+const chart=LightweightCharts.createChart(chartEl, opts);
 const ivBars=chart.addCandlestickSeries({
   upColor:"#26a69a", downColor:"#ef5350",
   borderUpColor:"#26a69a", borderDownColor:"#ef5350",
@@ -64,7 +86,13 @@ function captureRange(){
 function applyChipRange(){
   const n=ivData.length; if(!n) return;
   restoring=true;
-  chart.timeScale().setVisibleLogicalRange({from:Math.max(-0.5,n-visibleBars), to:n+0.5});
+  // With sparse history, fit content so date ticks actually render.
+  if(n < Math.min(visibleBars, 12)){
+    chart.timeScale().fitContent();
+    chart.timeScale().applyOptions({rightOffset:3});
+  }else{
+    chart.timeScale().setVisibleLogicalRange({from:Math.max(-0.5,n-visibleBars), to:n+0.5});
+  }
   captureRange();
   restoring=false;
   fittedOnce=true;
@@ -103,7 +131,6 @@ async function load(){
     const res=await fetch(BARS_URL+(BARS_URL.includes("?")?"&":"?")+"t="+Date.now(),{cache:"no-store"});
     if(!res.ok) throw new Error(res.status);
     const data=await res.json();
-    // Snapshot zoom before setData so background refresh cannot jump the view.
     captureRange();
     const keep=savedTimeRange ? {from:savedTimeRange.from, to:savedTimeRange.to} : null;
     ivData=data.iv||[];
@@ -127,10 +154,12 @@ async function load(){
     meta.textContent="refresh failed — "+BARS_URL;
   }
 }
-new ResizeObserver(()=>{
-  chart.applyOptions({width:chart.clientWidth||document.getElementById("chart").clientWidth,
-                      height:document.getElementById("chart").clientHeight});
-}).observe(document.body);
+function resize(){
+  const r=chartEl.getBoundingClientRect();
+  if(r.width>0 && r.height>0) chart.applyOptions({width:r.width, height:r.height});
+}
+new ResizeObserver(resize).observe(chartEl);
+resize();
 load(); setInterval(load, 30000);
 </script>
 </body>
