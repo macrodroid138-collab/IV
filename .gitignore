@@ -3,5 +3,6 @@ __pycache__/
 .env
 .env.*
 *.token
+token.txt
 .venv/
 venv/
