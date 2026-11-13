@@ -22,7 +22,6 @@
   #chips{display:flex;gap:6px;padding:6px 10px;border-bottom:1px solid var(--line)}
   .chip{border:1px solid #30363d;background:#161b22;color:var(--text);border-radius:6px;padding:4px 10px;font-size:12px}
   .chip.active{border-color:var(--iv);color:#fff}
-  /* flex:1 + min-height:0 keeps the time-scale axis on-screen (no 100vh clip) */
   #chart{flex:1 1 auto;min-height:0;width:100%}
 </style>
 </head>
@@ -62,10 +61,7 @@ const opts={layout:{background:{color:"#0d1117"},textColor:"#d1d4dc",fontSize:11
     ticksVisible:true,
     tickMarkFormatter:fmtTick,
   },
-  localization:{
-    locale:"en-US",
-    timeFormatter:fmtTick,
-  },
+  localization:{locale:"en-US", timeFormatter:fmtTick},
   handleScroll:{vertTouchDrag:false}};
 const chart=LightweightCharts.createChart(chartEl, opts);
 const ivBars=chart.addCandlestickSeries({
@@ -75,18 +71,24 @@ const ivBars=chart.addCandlestickSeries({
   title:"IV %"
 });
 const ivLine=chart.addLineSeries({color:"#00BFFF", lineWidth:2, priceLineVisible:false, lastValueVisible:true});
-let ivData=[], visibleBars=78, fittedOnce=false, savedTimeRange=null, restoring=false;
+let ivData=[], visibleBars=78, fittedOnce=false;
+let savedLogical=null, restoring=false, lastIvSig="", userPanned=false;
 
+function ivSig(iv){
+  return (iv||[]).map(b=>`${b.time}:${b.open}:${b.high}:${b.low}:${b.close}`).join("|");
+}
 function captureRange(){
   if(restoring) return;
-  const tr=chart.timeScale().getVisibleRange();
-  if(tr && tr.from!=null && tr.to!=null) savedTimeRange={from:tr.from, to:tr.to};
+  const lr=chart.timeScale().getVisibleLogicalRange();
+  if(lr && lr.from!=null && lr.to!=null){
+    savedLogical={from:lr.from, to:lr.to};
+    if(fittedOnce) userPanned=true;
+  }
 }
-
 function applyChipRange(){
   const n=ivData.length; if(!n) return;
   restoring=true;
-  // With sparse history, fit content so date ticks actually render.
+  userPanned=false;
   if(n < Math.min(visibleBars, 12)){
     chart.timeScale().fitContent();
     chart.timeScale().applyOptions({rightOffset:3});
@@ -97,17 +99,14 @@ function applyChipRange(){
   restoring=false;
   fittedOnce=true;
 }
-
 function restoreRange(){
-  if(!savedTimeRange) return false;
+  if(!savedLogical) return false;
   restoring=true;
-  try{ chart.timeScale().setVisibleRange(savedTimeRange); }
+  try{ chart.timeScale().setVisibleLogicalRange(savedLogical); }
   catch(e){ restoring=false; return false; }
   restoring=false;
   return true;
 }
-
-chart.timeScale().subscribeVisibleTimeRangeChange(captureRange);
 chart.timeScale().subscribeVisibleLogicalRangeChange(captureRange);
 
 function paintHud(bar){
@@ -126,28 +125,50 @@ document.querySelectorAll(".chip").forEach(btn=>btn.addEventListener("click",()=
   document.querySelectorAll(".chip").forEach(b=>b.classList.remove("active"));
   btn.classList.add("active"); visibleBars=+btn.dataset.bars; applyChipRange();
 }));
+
+function paintMeta(data){
+  const exp=data.expiration?` · exp ${data.expiration}`:"";
+  sym.textContent=`${data.ticker||"SPY"} · ${data.book||""} IV · 10m${exp}`;
+  meta.textContent="updated "+(data.updated||"").replace("T"," ").slice(0,19);
+  spot.textContent=data.spot!=null?Number(data.spot).toFixed(2):"—";
+  live.style.color=(data.iv||[]).length?"#26a69a":"#f59e0b";
+}
+
 async function load(){
   try{
     const res=await fetch(BARS_URL+(BARS_URL.includes("?")?"&":"?")+"t="+Date.now(),{cache:"no-store"});
     if(!res.ok) throw new Error(res.status);
     const data=await res.json();
+    const next=data.iv||[];
+    const sig=ivSig(next);
+    paintMeta(data);
+    if(!next.length){
+      meta.textContent="no IV bars yet — waiting for RTH samples";
+      return;
+    }
+    // Same candles → do not setData (avoids zoom/autoscale jump every 30s).
+    if(sig===lastIvSig && fittedOnce){
+      if(next.length) paintHud(next.at(-1));
+      return;
+    }
     captureRange();
-    const keep=savedTimeRange ? {from:savedTimeRange.from, to:savedTimeRange.to} : null;
-    ivData=data.iv||[];
+    const keep=savedLogical ? {from:savedLogical.from, to:savedLogical.to} : null;
+    const prevLen=ivData.length;
+    ivData=next;
+    lastIvSig=sig;
     ivBars.setData(ivData);
     ivLine.setData(ivData.map(b=>({time:b.time, value:b.close})));
-    const exp=data.expiration?` · exp ${data.expiration}`:"";
-    sym.textContent=`${data.ticker||"SPY"} · ${data.book||""} IV · 10m${exp}`;
-    meta.textContent="updated "+(data.updated||"").replace("T"," ").slice(0,19);
-    spot.textContent=data.spot!=null?Number(data.spot).toFixed(2):"—";
-    live.style.color=ivData.length?"#26a69a":"#f59e0b";
-    if(ivData.length) paintHud(ivData.at(-1));
-    else meta.textContent="no IV bars yet — waiting for RTH samples";
-    if(!ivData.length) return;
-    if(!fittedOnce) applyChipRange();
-    else if(keep){
-      savedTimeRange=keep;
-      if(!restoreRange()) applyChipRange();
+    paintHud(ivData.at(-1));
+    if(!fittedOnce){
+      applyChipRange();
+      return;
+    }
+    // Keep the user's window. If bars were appended, shift logical range by delta
+    // so the same candles stay put (no jump to fitContent).
+    if(keep){
+      const delta=Math.max(0, ivData.length - prevLen);
+      savedLogical={from:keep.from+delta, to:keep.to+delta};
+      restoreRange();
     }
   }catch(e){
     live.style.color="#ef5350";

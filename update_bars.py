@@ -223,10 +223,11 @@ def write_iv_bars(ticker, book, expiration, iv_csv, out_json, spot, rth_only=Fal
 
 
 def append_iv(csv_path, price, atm_iv, expiration, book):
+    # Always store America/New_York wall-clock (Actions runners are UTC).
     row = pd.DataFrame(
         [
             {
-                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Timestamp": datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S"),
                 "Price": round(price, 2),
                 "ATM_IV": atm_iv,
                 "Expiration": expiration,
@@ -235,6 +236,36 @@ def append_iv(csv_path, price, atm_iv, expiration, book):
         ]
     )
     row.to_csv(csv_path, mode="a", header=not os.path.exists(csv_path), index=False)
+
+
+TZ_MARKER = os.path.join(ROOT, ".iv_timestamps_et")
+
+
+def migrate_csv_utc_wallclock_to_et(csv_path):
+    """
+    Older ticks used datetime.now() on UTC runners, so the naive Timestamp was
+    UTC wall-clock. Chart code treats naive stamps as ET — that made 05:10 ET
+    display as 10:10. Convert once, then new rows are written in ET.
+    """
+    if not os.path.exists(csv_path):
+        return
+    df = pd.read_csv(csv_path, parse_dates=["Timestamp"])
+    if df.empty:
+        return
+    et = df["Timestamp"].dt.tz_localize("UTC").dt.tz_convert(ET)
+    df["Timestamp"] = et.dt.strftime("%Y-%m-%d %H:%M:%S")
+    df.to_csv(csv_path, index=False)
+    print(f"migrated {os.path.basename(csv_path)} timestamps UTC→ET")
+
+
+def ensure_et_timestamps():
+    if os.path.exists(TZ_MARKER):
+        return
+    migrate_csv_utc_wallclock_to_et(ODTE_IV_CSV)
+    migrate_csv_utc_wallclock_to_et(DTE1_IV_CSV)
+    with open(TZ_MARKER, "w") as f:
+        f.write("et\n")
+    print("timestamp basis: America/New_York")
 
 
 def main():
@@ -252,6 +283,7 @@ def main():
     exp_1 = exps[1] if len(exps) > 1 else None
 
     print(f"{now_et} RTH={rth} {TICKER}=${spot:.2f} nearest={exp_0} next={exp_1}")
+    ensure_et_timestamps()
     cleanup_old(ODTE_IV_CSV)
     cleanup_old(DTE1_IV_CSV)
 

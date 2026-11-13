@@ -69,6 +69,7 @@ jobs:
             git add SPY_0dte_bars.json SPY_1dte_bars.json
             if [ -f SPY_0dte_iv_ticks.csv ]; then git add SPY_0dte_iv_ticks.csv; fi
             if [ -f SPY_1dte_iv_ticks.csv ]; then git add SPY_1dte_iv_ticks.csv; fi
+            if [ -f .iv_timestamps_et ]; then git add .iv_timestamps_et; fi
 
             if git diff --staged --quiet; then
               echo "No changes"
