@@ -1,4 +1,4 @@
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 import json
 import os
@@ -9,6 +9,7 @@ import yfinance as yf
 TICKER = "SPY"
 ET = ZoneInfo("America/New_York")
 ROOT = os.path.dirname(os.path.abspath(__file__))
+RETENTION_DAYS = 84
 
 ODTE_IV_CSV = os.path.join(ROOT, f"{TICKER}_0dte_iv_ticks.csv")
 DTE1_IV_CSV = os.path.join(ROOT, f"{TICKER}_1dte_iv_ticks.csv")
@@ -42,6 +43,16 @@ def get_atm_iv(ticker_obj, spot, expiration):
     return round(((float(c["impliedVolatility"]) + float(p["impliedVolatility"])) / 2.0) * 100, 2)
 
 
+def cleanup_old(csv_path):
+    if not os.path.exists(csv_path):
+        return
+    df = pd.read_csv(csv_path, parse_dates=["Timestamp"])
+    if df.empty:
+        return
+    cutoff = datetime.now() - pd.Timedelta(days=RETENTION_DAYS)
+    df[df["Timestamp"] >= cutoff].to_csv(csv_path, index=False)
+
+
 def filter_rth(df):
     if df.empty:
         return df
@@ -69,20 +80,7 @@ def to_lwc_bars(df):
     return bars
 
 
-def price_10m(ticker):
-    raw = yf.Ticker(ticker).history(period="60d", interval="5m")
-    if raw.empty:
-        return pd.DataFrame()
-    raw.index = raw.index.tz_convert(ET).tz_localize(None)
-    px = (
-        raw.resample("10min")
-        .agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"})
-        .dropna()
-    )
-    return filter_rth(px)
-
-
-def iv_10m(csv_path):
+def iv_10m_from_csv(csv_path):
     if not os.path.exists(csv_path):
         return pd.DataFrame()
     df = pd.read_csv(csv_path, parse_dates=["Timestamp"])
@@ -95,23 +93,21 @@ def iv_10m(csv_path):
     return filter_rth(out)
 
 
-def write_bars(ticker, book, expiration, iv_csv, out_json):
-    px = price_10m(ticker)
-    if px.empty:
-        return False
-    iv = iv_10m(iv_csv)
+def write_iv_bars(ticker, book, expiration, iv_csv, out_json, spot):
+    iv = iv_10m_from_csv(iv_csv)
     payload = {
         "ticker": ticker,
         "book": book,
         "expiration": expiration,
         "interval": "10m",
+        "spot": round(float(spot), 2) if spot is not None else None,
         "updated": datetime.now(ET).isoformat(),
-        "price": to_lwc_bars(px),
         "iv": to_lwc_bars(iv) if not iv.empty else [],
     }
     with open(out_json, "w") as f:
         json.dump(payload, f, separators=(",", ":"))
-    return True
+    print(f"{book}: wrote {len(payload['iv'])} IV 10m bars -> {os.path.basename(out_json)}")
+    return len(payload["iv"])
 
 
 def append_iv(csv_path, price, atm_iv, expiration, book):
@@ -135,27 +131,33 @@ def main():
     exp_1 = exps[1] if len(exps) > 1 else None
 
     print(f"{now_et} RTH={rth} {TICKER}=${spot:.2f} 0DTE={exp_0} 1DTE={exp_1}")
+    cleanup_old(ODTE_IV_CSV)
+    cleanup_old(DTE1_IV_CSV)
 
-    if exp_0:
-        if rth:
-            iv0 = get_atm_iv(tkr, spot, exp_0)
-            if iv0 is not None:
-                append_iv(ODTE_IV_CSV, spot, iv0, exp_0, "0DTE")
-                print(f"0DTE IV appended: {iv0}")
-            else:
-                print("0DTE IV skipped (stale quotes)")
+    if rth and exp_0:
+        iv0 = get_atm_iv(tkr, spot, exp_0)
+        if iv0 is not None:
+            append_iv(ODTE_IV_CSV, spot, iv0, exp_0, "0DTE")
+            print(f"0DTE IV appended: {iv0}%")
         else:
-            print("0DTE IV skipped (outside RTH)")
-        write_bars(TICKER, "0DTE", exp_0, ODTE_IV_CSV, ODTE_BARS)
+            print("0DTE IV skipped (stale quotes)")
+    else:
+        print("0DTE IV skipped (outside RTH)" if exp_0 else "no 0DTE expiry")
 
-    if exp_1:
+    if rth and exp_1:
         iv1 = get_atm_iv(tkr, spot, exp_1)
         if iv1 is not None:
             append_iv(DTE1_IV_CSV, spot, iv1, exp_1, "1DTE")
-            print(f"1DTE IV appended: {iv1}")
+            print(f"1DTE IV appended: {iv1}%")
         else:
             print("1DTE IV skipped (stale quotes)")
-        write_bars(TICKER, "1DTE", exp_1, DTE1_IV_CSV, DTE1_BARS)
+    else:
+        print("1DTE IV skipped (outside RTH)" if exp_1 else "no 1DTE expiry")
+
+    if exp_0:
+        write_iv_bars(TICKER, "0DTE", exp_0, ODTE_IV_CSV, ODTE_BARS, spot)
+    if exp_1:
+        write_iv_bars(TICKER, "1DTE", exp_1, DTE1_IV_CSV, DTE1_BARS, spot)
 
     print("done")
 
