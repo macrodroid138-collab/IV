@@ -1,6 +1,7 @@
 from datetime import datetime, time as dtime
 from zoneinfo import ZoneInfo
 import json
+import math
 import os
 
 import pandas as pd
@@ -10,6 +11,8 @@ TICKER = "SPY"
 ET = ZoneInfo("America/New_York")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 RETENTION_DAYS = 84
+RISK_FREE = 0.05
+MIN_IV = 0.01  # 1% absolute vol floor for usable Yahoo IV
 
 ODTE_IV_CSV = os.path.join(ROOT, f"{TICKER}_0dte_iv_ticks.csv")
 DTE1_IV_CSV = os.path.join(ROOT, f"{TICKER}_1dte_iv_ticks.csv")
@@ -26,11 +29,110 @@ def is_rth(now_et=None):
     return dtime(9, 30) <= t < dtime(16, 0)
 
 
+def get_spot(ticker_obj):
+    """Yahoo fast_info can flake; fall back to last daily close."""
+    try:
+        spot = ticker_obj.fast_info.get("last_price")
+        if spot is not None and float(spot) > 0:
+            return float(spot)
+    except Exception:
+        pass
+    hist = ticker_obj.history(period="5d")
+    if hist is None or hist.empty:
+        return None
+    return float(hist["Close"].dropna().iloc[-1])
+
+
+def years_to_expiry(expiration, now_et=None):
+    """Calendar years until 16:00 ET on the listed expiry date."""
+    now_et = now_et or datetime.now(ET)
+    exp_dt = datetime.fromisoformat(expiration).replace(
+        hour=16, minute=0, second=0, microsecond=0, tzinfo=ET
+    )
+    secs = max((exp_dt - now_et).total_seconds(), 60.0)
+    return secs / (365.25 * 24 * 3600)
+
+
+def _norm_cdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _bs_price(spot, strike, t_years, rate, sigma, kind):
+    if t_years <= 0 or sigma <= 0:
+        intrinsic = max(0.0, spot - strike) if kind == "call" else max(0.0, strike - spot)
+        return intrinsic
+    sqrt_t = math.sqrt(t_years)
+    d1 = (math.log(spot / strike) + (rate + 0.5 * sigma * sigma) * t_years) / (
+        sigma * sqrt_t
+    )
+    d2 = d1 - sigma * sqrt_t
+    if kind == "call":
+        return spot * _norm_cdf(d1) - strike * math.exp(-rate * t_years) * _norm_cdf(d2)
+    return strike * math.exp(-rate * t_years) * _norm_cdf(-d2) - spot * _norm_cdf(-d1)
+
+
+def implied_vol_from_price(price, spot, strike, t_years, kind, rate=RISK_FREE):
+    """Bisection BS IV. Returns decimal vol or None."""
+    if price is None or price <= 0 or spot <= 0 or strike <= 0 or t_years <= 0:
+        return None
+    # Reject prices below intrinsic (stale/crossed last trades).
+    disc_k = strike * math.exp(-rate * t_years)
+    intrinsic = max(0.0, spot - disc_k) if kind == "call" else max(0.0, disc_k - spot)
+    if price < intrinsic * 0.98:
+        return None
+
+    lo, hi = 1e-4, 5.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        model = _bs_price(spot, strike, t_years, rate, mid, kind)
+        if model > price:
+            hi = mid
+        else:
+            lo = mid
+    iv = 0.5 * (lo + hi)
+    if iv < MIN_IV or iv > 4.0:
+        return None
+    return iv
+
+
+def _leg_quote_price(leg, strict_quotes):
+    bid = float(leg.get("bid") or 0)
+    ask = float(leg.get("ask") or 0)
+    last = float(leg.get("lastPrice") or 0)
+    live = bid > 0 and ask > bid
+    if strict_quotes and not live:
+        return None, False
+    if live:
+        return 0.5 * (bid + ask), True
+    if last > 0:
+        return last, False
+    return None, False
+
+
+def _leg_iv(leg, spot, t_years, kind, strict_quotes):
+    yahoo_iv = float(leg.get("impliedVolatility") or 0)
+    price, live = _leg_quote_price(leg, strict_quotes)
+    if price is None:
+        return None
+
+    # Prefer Yahoo IV when it looks real AND we have a live quote (RTH),
+    # or when loose mode and Yahoo IV is usable.
+    if yahoo_iv >= MIN_IV:
+        if (not strict_quotes) or live:
+            return yahoo_iv
+
+    # Workaround: Yahoo often posts ~0 ATM IV with flat bid/ask off-hours.
+    # Back out IV from mid (preferred) or lastPrice via Black-Scholes.
+    return implied_vol_from_price(
+        price, spot, float(leg.get("strike") or 0), t_years, kind
+    )
+
+
 def get_atm_iv(ticker_obj, spot, expiration, strict_quotes=True):
     """
     ATM call/put mid IV (%).
     strict_quotes=True  -> require live bid/ask (0DTE / RTH)
-    strict_quotes=False -> accept Yahoo IV even if bid/ask flat (next expiry off-hours)
+    strict_quotes=False -> accept Yahoo IV or BS-from-last even if bid/ask flat
     """
     chain = ticker_obj.option_chain(expiration)
     calls, puts = chain.calls.copy(), chain.puts.copy()
@@ -42,17 +144,11 @@ def get_atm_iv(ticker_obj, spot, expiration, strict_quotes=True):
     c = calls.loc[calls["dist"].idxmin()]
     p = puts.loc[puts["dist"].idxmin()]
 
-    iv_c = float(c.get("impliedVolatility") or 0)
-    iv_p = float(p.get("impliedVolatility") or 0)
-    if iv_c < 0.01 or iv_p < 0.01:
+    t_years = years_to_expiry(expiration)
+    iv_c = _leg_iv(c, spot, t_years, "call", strict_quotes)
+    iv_p = _leg_iv(p, spot, t_years, "put", strict_quotes)
+    if iv_c is None or iv_p is None:
         return None
-
-    if strict_quotes:
-        for leg in (c, p):
-            bid = float(leg.get("bid") or 0)
-            ask = float(leg.get("ask") or 0)
-            if bid <= 0 or ask <= bid:
-                return None
 
     return round(((iv_c + iv_p) / 2.0) * 100, 2)
 
@@ -145,7 +241,10 @@ def main():
     now_et = datetime.now(ET)
     rth = is_rth(now_et)
     tkr = yf.Ticker(TICKER)
-    spot = float(tkr.fast_info["last_price"])
+    spot = get_spot(tkr)
+    if spot is None:
+        print("no spot — abort")
+        return
     exps = list(tkr.options)
 
     # First two listed expiries: nearest + next
