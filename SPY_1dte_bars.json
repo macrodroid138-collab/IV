@@ -1,1 +1,1 @@
-{"ticker":"SPY","book":"1DTE","expiration":"2026-11-16","interval":"10m","spot":757.12,"updated":"2026-11-13T05:15:27.475773-05:00","iv":[{"time":1794582600,"open":13.89,"high":13.89,"low":13.89,"close":13.89}]}
+{"ticker":"SPY","book":"1DTE","expiration":"2026-11-16","interval":"10m","spot":757.12,"updated":"2026-11-13T05:30:20.972513-05:00","iv":[{"time":1794582600,"open":13.89,"high":13.89,"low":13.89,"close":13.89},{"time":1794583800,"open":13.91,"high":13.91,"low":13.91,"close":13.91}]}
