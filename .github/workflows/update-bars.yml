@@ -29,8 +29,6 @@ jobs:
 
       - name: Commit & push if changed
         run: |
-                - name: Commit & push if changed
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add SPY_0dte_bars.json SPY_1dte_bars.json
