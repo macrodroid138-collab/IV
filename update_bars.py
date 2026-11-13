@@ -110,19 +110,10 @@ def _leg_quote_price(leg, strict_quotes):
 
 
 def _leg_iv(leg, spot, t_years, kind, strict_quotes):
-    yahoo_iv = float(leg.get("impliedVolatility") or 0)
-    price, live = _leg_quote_price(leg, strict_quotes)
+    """Always back out IV with Black-Scholes from mid (live) or lastPrice."""
+    price, _live = _leg_quote_price(leg, strict_quotes)
     if price is None:
         return None
-
-    # Prefer Yahoo IV when it looks real AND we have a live quote (RTH),
-    # or when loose mode and Yahoo IV is usable.
-    if yahoo_iv >= MIN_IV:
-        if (not strict_quotes) or live:
-            return yahoo_iv
-
-    # Workaround: Yahoo often posts ~0 ATM IV with flat bid/ask off-hours.
-    # Back out IV from mid (preferred) or lastPrice via Black-Scholes.
     return implied_vol_from_price(
         price, spot, float(leg.get("strike") or 0), t_years, kind
     )
@@ -130,9 +121,9 @@ def _leg_iv(leg, spot, t_years, kind, strict_quotes):
 
 def get_atm_iv(ticker_obj, spot, expiration, strict_quotes=True):
     """
-    ATM call/put mid IV (%).
-    strict_quotes=True  -> require live bid/ask (0DTE / RTH)
-    strict_quotes=False -> accept Yahoo IV or BS-from-last even if bid/ask flat
+    ATM call/put mid IV (%) via Black-Scholes (never Yahoo impliedVolatility).
+    strict_quotes=True  -> require live bid/ask mid (0DTE / RTH)
+    strict_quotes=False -> allow lastPrice when bid/ask are flat (next expiry)
     """
     chain = ticker_obj.option_chain(expiration)
     calls, puts = chain.calls.copy(), chain.puts.copy()
