@@ -2,11 +2,21 @@ name: Update IV bars
 
 on:
   workflow_dispatch:
+    inputs:
+      loops:
+        description: "How many samples this run (sleep 5m between). Use 1 for a single shot."
+        required: false
+        default: "11"
+  repository_dispatch:
+    types: [update-iv]
   schedule:
-    # Every 5 minutes, every day (GitHub cannot do 2-minute cron).
-    # 0DTE append is gated in Python (RTH only).
-    # Next-expiry appends on every run, including nights/weekends.
-    - cron: "*/5 * * * *"
+    # GitHub's */5 cron is unreliable (often delayed/skipped).
+    # Start once an hour; the job loops every 5 minutes internally.
+    - cron: "1 * * * *"
+
+concurrency:
+  group: update-iv-bars
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -14,9 +24,12 @@ permissions:
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 65
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -26,19 +39,49 @@ jobs:
       - name: Install deps
         run: pip install pandas yfinance
 
-      - name: Run updater
-        run: python update_bars.py
-
-      - name: Commit & push if changed
+      - name: Poll IV every 5 minutes
+        env:
+          # schedule / repository_dispatch → 11 samples (~55m)
+          # workflow_dispatch → use input (default 11)
+          LOOPS: ${{ github.event.inputs.loops || '11' }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add SPY_0dte_bars.json SPY_1dte_bars.json
-          if [ -f SPY_0dte_iv_ticks.csv ]; then git add SPY_0dte_iv_ticks.csv; fi
-          if [ -f SPY_1dte_iv_ticks.csv ]; then git add SPY_1dte_iv_ticks.csv; fi
-          if git diff --staged --quiet; then
-            echo "No changes"
-          else
-            git commit -m "Update SPY IV bars $(date -u +%Y-%m-%dT%H:%MZ)"
-            git push
-          fi
+
+          loops="$LOOPS"
+          case "$loops" in
+            ''|*[!0-9]*) loops=11 ;;
+          esac
+          if [ "$loops" -lt 1 ]; then loops=1; fi
+          if [ "$loops" -gt 12 ]; then loops=12; fi
+
+          echo "Running $loops sample(s) at ~5 minute spacing"
+
+          i=1
+          while [ "$i" -le "$loops" ]; do
+            echo "=== sample $i/$loops @ $(date -u +%Y-%m-%dT%H:%MZ) ==="
+            git fetch origin main
+            git reset --hard origin/main
+
+            python update_bars.py
+
+            git add SPY_0dte_bars.json SPY_1dte_bars.json
+            if [ -f SPY_0dte_iv_ticks.csv ]; then git add SPY_0dte_iv_ticks.csv; fi
+            if [ -f SPY_1dte_iv_ticks.csv ]; then git add SPY_1dte_iv_ticks.csv; fi
+
+            if git diff --staged --quiet; then
+              echo "No changes"
+            else
+              git commit -m "Update SPY IV bars $(date -u +%Y-%m-%dT%H:%MZ)"
+              git push origin HEAD:main
+            fi
+
+            if [ "$i" -lt "$loops" ]; then
+              echo "Sleeping 300s…"
+              sleep 300
+            fi
+            i=$((i + 1))
+          done
+
+          echo "done"
