@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"/>
+<meta name="theme-color" content="#0d1117"/>
+<title>SPY 0DTE</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root{--bg:#0d1117;--hud:#111827;--line:#1f2937;--text:#d1d4dc;--muted:#8b949e;--iv:#00bcd4}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font:13px/1.25 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+  #top{display:flex;justify-content:space-between;align-items:center;gap:8px;
+    padding:8px 10px;background:var(--hud);border-bottom:1px solid var(--line)}
+  #sym{font-weight:700;font-size:15px} #meta{color:var(--muted);font-size:11px}
+  #hud{display:flex;flex-wrap:wrap;gap:8px 12px;padding:6px 10px;border-bottom:1px solid var(--line);
+    font-variant-numeric:tabular-nums}
+  #hud span{color:var(--muted)} #hud b{color:#fff;font-weight:600}
+  #chips{display:flex;gap:6px;padding:6px 10px;border-bottom:1px solid var(--line)}
+  .chip{border:1px solid #30363d;background:#161b22;color:var(--text);border-radius:6px;padding:4px 10px;font-size:12px}
+  .chip.active{border-color:var(--iv);color:#fff}
+  #price{height:54vh} #ivwrap{height:calc(46vh - 92px);position:relative}
+  #ivlabel{position:absolute;left:10px;top:6px;z-index:2;color:var(--muted);font-size:11px}
+  #iv{height:100%;width:100%}
+</style>
+</head>
+<body>
+  <div id="top"><div><div id="sym">SPY 0DTE</div><div id="meta">loading…</div></div><div id="live">●</div></div>
+  <div id="hud">
+    <span>O <b id="o">—</b></span><span>H <b id="h">—</b></span>
+    <span>L <b id="l">—</b></span><span>C <b id="c">—</b></span>
+    <span>IV <b id="ivv">—</b>%</span>
+  </div>
+  <div id="chips">
+    <button class="chip" data-bars="78">1D</button>
+    <button class="chip active" data-bars="156">2D</button>
+    <button class="chip" data-bars="390">5D</button>
+    <button class="chip" data-bars="9999">60D</button>
+  </div>
+  <div id="price"></div>
+  <div id="ivwrap"><div id="ivlabel">0DTE ATM IV %</div><div id="iv"></div></div>
+<script>
+const BARS_URL="SPY_0dte_bars.json";
+const opts={layout:{background:{color:"#0d1117"},textColor:"#d1d4dc"},
+  grid:{vertLines:{color:"#1f242c"},horzLines:{color:"#1f242c"}},
+  crosshair:{mode:LightweightCharts.CrosshairMode.Normal},
+  rightPriceScale:{borderVisible:false},
+  timeScale:{borderVisible:false,timeVisible:true,secondsVisible:false},
+  handleScroll:{vertTouchDrag:false}};
+const priceChart=LightweightCharts.createChart(price,opts);
+const ivChart=LightweightCharts.createChart(iv,opts);
+const candles=priceChart.addCandlestickSeries({upColor:"#26a69a",downColor:"#ef5350",borderUpColor:"#26a69a",borderDownColor:"#ef5350",wickUpColor:"#26a69a",wickDownColor:"#ef5350"});
+const ivCandle=ivChart.addCandlestickSeries({upColor:"#006400",downColor:"#8B0000",borderUpColor:"#006400",borderDownColor:"#8B0000",wickUpColor:"#006400",wickDownColor:"#8B0000"});
+const ivLine=ivChart.addLineSeries({color:"#00BFFF",lineWidth:2,priceLineVisible:false});
+let syncing=false;
+function sync(a,b){a.timeScale().subscribeVisibleLogicalRangeChange(r=>{if(syncing||!r)return;syncing=true;b.timeScale().setVisibleLogicalRange(r);syncing=false})}
+sync(priceChart,ivChart);sync(ivChart,priceChart);
+let priceData=[],ivData=[],visibleBars=156;
+function setRange(){const n=priceData.length;if(!n)return;const r={from:Math.max(0,n-visibleBars),to:n};priceChart.timeScale().setVisibleLogicalRange(r);ivChart.timeScale().setVisibleLogicalRange(r)}
+function paintHud(bar,ivBar){if(!bar)return;o.textContent=bar.open.toFixed(2);h.textContent=bar.high.toFixed(2);l.textContent=bar.low.toFixed(2);c.textContent=bar.close.toFixed(2);c.style.color=bar.close>=bar.open?"#26a69a":"#ef5350";ivv.textContent=ivBar?ivBar.close.toFixed(2):"—"}
+priceChart.subscribeCrosshairMove(p=>{const bar=p.seriesData?.get(candles),ivBar=p.seriesData?.get(ivCandle);if(bar)paintHud(bar,ivBar)});
+document.querySelectorAll(".chip").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".chip").forEach(b=>b.classList.remove("active"));btn.classList.add("active");visibleBars=+btn.dataset.bars;setRange()}));
+async function load(){try{const res=await fetch(BARS_URL+(BARS_URL.includes("?")?"&":"?")+"t="+Date.now(),{cache:"no-store"});if(!res.ok)throw new Error(res.status);const data=await res.json();priceData=data.price||[];ivData=data.iv||[];candles.setData(priceData);ivCandle.setData(ivData);ivLine.setData(ivData.map(b=>({time:b.time,value:b.close})));sym.textContent=`${data.ticker||"—"} · ${data.book||""} · 10m`+(data.expiration?` · exp ${data.expiration}`:"");meta.textContent="updated "+(data.updated||"").replace("T"," ").slice(0,19);live.style.color="#26a69a";if(priceData.length)paintHud(priceData.at(-1),ivData.at(-1));setRange()}catch(e){live.style.color="#ef5350";meta.textContent="refresh failed — "+BARS_URL}}
+new ResizeObserver(()=>{priceChart.applyOptions({width:price.clientWidth,height:price.clientHeight});ivChart.applyOptions({width:iv.clientWidth,height:iv.clientHeight})}).observe(document.body);
+load();setInterval(load,30000);
+</script>
+</body>
+</html>
