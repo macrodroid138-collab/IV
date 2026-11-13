@@ -10,14 +10,10 @@ on:
   repository_dispatch:
     types: [update-iv]
   schedule:
-    # GitHub often skips dense crons; fire 4x/hour instead of relying on */5.
-    # Each scheduled run takes one sample (loops default = 1).
-    # If schedule still never appears in Actions history, use MacroDroid / cron-job.org
-    # to POST workflow_dispatch every 5–15 minutes (see repo README note).
-    - cron: "0 * * * *"
-    - cron: "15 * * * *"
-    - cron: "30 * * * *"
-    - cron: "45 * * * *"
+    # Target: one sample every 5 minutes, every day.
+    # GitHub may delay/skip some slots under load — if Actions history shows no
+    # "schedule" runs, use MacroDroid to POST workflow_dispatch every 5 minutes.
+    - cron: "*/5 * * * *"
 
 concurrency:
   group: update-iv-bars
