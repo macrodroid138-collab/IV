@@ -3,8 +3,9 @@ name: Update IV bars
 on:
   workflow_dispatch:
   schedule:
-    # Every 30 minutes, Mon–Fri (UTC). Covers US RTH roughly.
-    - cron: "*/30 14-21 * * 1-5"
+    # GitHub Actions minimum is 5 minutes (cannot do 2).
+    # 5-min samples still form 10m IV OHLC bars.
+    - cron: "*/5 14-20 * * 1-5"
 
 permissions:
   contents: write
@@ -37,6 +38,6 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes"
           else
-            git commit -m "Update SPY bars $(date -u +%Y-%m-%dT%H:%MZ)"
+            git commit -m "Update SPY IV bars $(date -u +%Y-%m-%dT%H:%MZ)"
             git push
           fi
